@@ -4475,7 +4475,7 @@ class KvCacheConfig(StrictBaseModel, PybindMirror):
         "'fp8_ds_mla' selects the packed FP8 cache used by sparse MLA on SM90/SM120/SM121. "
         "Resolved at "
         "LLM-construction time, including when set via trtllm-serve "
-        "--extra_llm_api_options.",
+        "--config (formerly --extra_llm_api_options).",
         telemetry=TelemetryField.categorical("auto", "float16", "bfloat16",
                                              "float32", "fp8", "fp8_ds_mla",
                                              "nvfp4"))
