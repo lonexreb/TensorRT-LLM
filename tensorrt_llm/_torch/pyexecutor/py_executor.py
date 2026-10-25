@@ -6934,14 +6934,24 @@ class PyExecutor:
 
     def _update_new_active_requests_queue_latency(
             self, new_requests: List[RequestQueueItem]):
-        """Update queue latency metrics for new requests."""
+        """Accumulate the queue latency of newly admitted requests, in ms."""
         now = time.time()
-        latency = self.executor_request_queue.calculate_queue_latency(
+        latency_s = self.executor_request_queue.calculate_queue_latency(
             new_requests, now)
-        self.new_active_requests_queue_latency_ms += latency
+        # start_times and `now` are time.time() seconds; the stats field, like
+        # IterationStats::newActiveRequestsQueueLatencyMS, is milliseconds.
+        self.new_active_requests_queue_latency_ms += latency_s * 1000.0
 
     def _get_new_active_requests_queue_latency(self) -> float:
-        return self.new_active_requests_queue_latency_ms
+        """Take the latency accumulated since the last stats record.
+
+        As with _pending_num_new_active_requests, the sum belongs to the
+        record that reports it. Leaving it in place repeated it in every
+        later record and let it grow for the life of the executor.
+        """
+        latency_ms = self.new_active_requests_queue_latency_ms
+        self.new_active_requests_queue_latency_ms = 0.0
+        return latency_ms
 
     def _should_exclude_last_generation_logits(self) -> bool:
         return self.should_exclude_last_generation_logits

@@ -35,6 +35,7 @@ from tensorrt_llm._torch.pyexecutor.engine.runners.encoder_decoder import Encode
 from tensorrt_llm._torch.pyexecutor.engine.runners.interface import ScheduledModelRunner
 from tensorrt_llm._torch.pyexecutor.executor_request_queue import (
     SHUTDOWN_REQUEST_ID,
+    ExecutorRequestQueue,
     RequestQueueItem,
 )
 from tensorrt_llm._torch.pyexecutor.kv_cache_load import KvLoadTracker
@@ -1420,6 +1421,33 @@ def test_getter_methods(mock_executor):
     assert mock_executor.get_expected_num_active_requests() == 5
     assert mock_executor._get_new_active_requests_queue_latency() == 10.5
     assert mock_executor.get_waiting_queue_size() == 1
+
+
+def test_new_active_requests_queue_latency_is_ms_and_taken_once(mock_dist):
+    """The queue latency stat is milliseconds and belongs to one record.
+
+    start_times and the admission time are time.time() seconds, but the
+    IterationStats field is `_ms` (newActiveRequestsQueueLatencyMS in C++),
+    and once a record has reported the sum it must not leak into later ones.
+    """
+    executor = object.__new__(PyExecutor)
+    executor.executor_request_queue = ExecutorRequestQueue(
+        dist=mock_dist, max_batch_size=8, enable_iter_perf_stats=True, batch_wait_timeout_ms=0.0
+    )
+    executor.new_active_requests_queue_latency_ms = 0.0
+
+    with (
+        patch("time.time", return_value=1000.0),
+        patch.object(executor.executor_request_queue, "_generate_child_request_ids"),
+    ):
+        req_id = executor.executor_request_queue.enqueue_request(Mock())
+    with patch("time.time", return_value=1000.5):
+        executor._update_new_active_requests_queue_latency([RequestQueueItem(req_id, Mock())])
+
+    # 0.5 s in the queue is reported as 500 ms ...
+    assert executor._get_new_active_requests_queue_latency() == pytest.approx(500.0)
+    # ... once: the next record starts from zero.
+    assert executor._get_new_active_requests_queue_latency() == 0.0
 
 
 def _make_executor_with_kv_cache_manager(kv_cache_manager):
