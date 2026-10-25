@@ -807,7 +807,8 @@ class CompletionPostprocArgs(PostprocArgs):
     num_choices: int = 1
     prompt_idx: int = 0
     detokenize: bool = True
-    prompt: Optional[str] = None
+    # The request's prompt item: text, or token ids for a token-id prompt.
+    prompt: Optional[Union[str, List[int]]] = None
     return_logprobs: bool = False
     stream_options: Optional[StreamOptions] = None
     ctx_usage: Optional[UsageInfo] = None
@@ -863,6 +864,25 @@ def create_completion_logprobs(token_ids: List[int],
                               top_logprobs=top_logprobs_list)
 
 
+def _echo_prompt_text(args: CompletionPostprocArgs) -> str:
+    """Prompt text to prepend for ``echo``.
+
+    /v1/completions accepts token-id prompts, which the server passes here
+    as a list; concatenating that with the generated text raised
+    ``TypeError: can only concatenate list (not "str") to list``. Detokenize
+    once and keep the text on ``args`` so streaming does not re-decode.
+    """
+    if isinstance(args.prompt, str):
+        return args.prompt
+    if args.tokenizer is None:
+        raise ValueError(
+            "'echo' with a token-id prompt requires a tokenizer to render "
+            "the prompt text.")
+    args.prompt = args.tokenizer.decode(args.prompt,
+                                        skip_special_tokens=False)
+    return args.prompt
+
+
 @nvtx_range_debug("completion_stream_post_processor")
 def completion_stream_post_processor(rsp: DetokenizedGenerationResultBase,
                                      args: CompletionPostprocArgs) -> List[str]:
@@ -881,7 +901,7 @@ def completion_stream_post_processor(rsp: DetokenizedGenerationResultBase,
     for output in rsp.outputs:
         delta_text = output.text_diff
         if args.echo and args.first_iteration:
-            delta_text = args.prompt + delta_text
+            delta_text = _echo_prompt_text(args) + delta_text
         choice = CompletionResponseStreamChoice(
             index=args.prompt_idx * args.num_choices + output.index,
             text=delta_text if args.detokenize else "",
@@ -947,7 +967,7 @@ def completion_response_post_processor(
     for output in rsp.outputs:
         text = output.text
         if args.echo:
-            text = args.prompt + text
+            text = _echo_prompt_text(args) + text
         disaggregated_params = to_disaggregated_params(
             output.disaggregated_params)
         choice = CompletionResponseChoice(
