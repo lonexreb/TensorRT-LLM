@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import io
+import warnings
 from typing import get_args
 from unittest import mock
 
@@ -236,3 +237,56 @@ def test_acceptance_length_weighted_by_iterations():
     # (= sum(output_tokens) / total_decoding_iterations). This would fail under
     # output-token weighting.
     assert stats.acceptance_length_percentiles.average == pytest.approx(stats.acceptance_length)
+
+
+def test_non_streaming_request_intertoken_latency_uses_e2e_time():
+    """Without a first-token timestamp, TPOT is E2E / (OSL - 1), not a clock value.
+
+    Non-streaming runs leave first_token_timestamp at -1; the previous formula
+    (end_timestamp - first_token_timestamp) / (OSL - 1) then produced an
+    absolute perf_counter reading (~1e11 ns for a 50 ms request) in --request_json.
+    """
+    keeper = StatsKeeper()
+    start = 10**12
+    keeper.register_request_perf_item(
+        PerfItemTuple(
+            start_timestamp=start,
+            end_timestamp=start + 50_000_000,
+            request_id=0,
+            num_input_tokens=8,
+            response_is_final=True,
+            error=False,
+            tokens=list(range(10)),
+            decoding_iteration=9,
+            time_on_first_token=None,
+        )
+    )
+    record = keeper.requests[0]
+
+    assert record.time_to_first_token == 0
+    assert record.intertoken_latency == pytest.approx(50_000_000 / 9)
+    assert record.intertoken_latency < record.end_to_end_latency
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no PydanticSerializationUnexpectedValue
+        record.model_dump()
+
+
+def test_streaming_request_intertoken_latency_unchanged():
+    keeper = StatsKeeper()
+    keeper.register_request_perf_item(
+        PerfItemTuple(
+            start_timestamp=0,
+            end_timestamp=1000,
+            request_id=0,
+            num_input_tokens=8,
+            response_is_final=True,
+            error=False,
+            tokens=list(range(10)),
+            decoding_iteration=9,
+            time_on_first_token=100,
+        )
+    )
+    record = keeper.requests[0]
+
+    assert record.time_to_first_token == 100
+    assert record.intertoken_latency == pytest.approx((1000 - 100) / 9)

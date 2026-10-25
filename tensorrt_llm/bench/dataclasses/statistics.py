@@ -59,16 +59,20 @@ class RequestRecord(BaseModel):
 
     @computed_field
     def time_to_first_token(self) -> int:
+        # 0, not 0.0: the field is declared int and model_dump() warns on a
+        # float (non-streaming runs never record a first-token timestamp).
         return (self.first_token_timestamp -
-                self.start_timestamp if self.first_token_timestamp > 0 else 0.0)
+                self.start_timestamp if self.first_token_timestamp > 0 else 0)
 
     @computed_field
     def intertoken_latency(self) -> float:
         """
-        Returns the time-per-output-token latency of the request [(OSL - 1) / (E2E Latency - TTFT)].
+        Returns the time-per-output-token latency of the request [(E2E Latency - TTFT) / (OSL - 1)].
         """
-        return ((self.end_timestamp - self.first_token_timestamp) /
-                self.num_generated_tokens
+        # Derive from generation_time rather than first_token_timestamp: that
+        # stays -1 for non-streaming requests, which turned this into
+        # (end_timestamp + 1) / (OSL - 1), an absolute clock reading.
+        return (self.generation_time / self.num_generated_tokens
                 if self.num_generated_tokens > 0 else 0.0)
 
     @computed_field
