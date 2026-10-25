@@ -108,6 +108,12 @@ class ChatPostprocArgs(PostprocArgs):
         default_factory=dict)
     tool_parser_dict: dict[int, BaseToolParser] = field(default_factory=dict)
     has_tool_call: dict[int, bool] = field(default_factory=dict)
+    # Per choice index, whether the terminal chunk has been streamed. Kept on
+    # the args (which live for the whole request) rather than per call: with
+    # n > 1 every candidate's step delivers a response, and rsp.outputs lists
+    # all candidates each time, so a finished choice would otherwise be
+    # re-emitted, finish_reason included, on each sibling step.
+    finish_reason_sent: dict[int, bool] = field(default_factory=dict)
     tool_call_id_type: str = "random"
     # Per-output flag tracking whether the streaming forced-call path has
     # already emitted the opening delta (with id and function name). The id is
@@ -428,7 +434,6 @@ def chat_stream_post_processor(rsp: GenerationResultBase,
         return data
 
     res: List[str] = []
-    finish_reason_sent = [False] * args.num_choices
     # num_prompt_tokens stays None until a prompt length is recorded, and only
     # the usage branches below consume it, so offset it only once it exists.
     prompt_tokens = args.num_prompt_tokens
@@ -468,7 +473,7 @@ def chat_stream_post_processor(rsp: GenerationResultBase,
     for output in rsp.outputs:
         i = output.index
 
-        if finish_reason_sent[i]:
+        if args.finish_reason_sent.get(i, False):
             continue
 
         has_token_delta = bool(output.token_ids_diff)
@@ -609,7 +614,7 @@ def chat_stream_post_processor(rsp: GenerationResultBase,
             else:
                 choice.finish_reason = output.finish_reason
             choice.stop_reason = output.stop_reason
-            finish_reason_sent[i] = True
+            args.finish_reason_sent[i] = True
         chunk = ChatCompletionStreamResponse(choices=[choice],
                                              model=args.model,
                                              id=stream_response_id,
@@ -810,6 +815,8 @@ class CompletionPostprocArgs(PostprocArgs):
     prompt: Optional[str] = None
     return_logprobs: bool = False
     stream_options: Optional[StreamOptions] = None
+    # See ChatPostprocArgs.finish_reason_sent.
+    finish_reason_sent: dict[int, bool] = field(default_factory=dict)
     ctx_usage: Optional[UsageInfo] = None
     # Cache per-request stream metadata so every chunk reuses the same response
     # id and created timestamp instead of regenerating them for each chunk.
@@ -879,9 +886,19 @@ def completion_stream_post_processor(rsp: DetokenizedGenerationResultBase,
         include_continuous_usage = False
 
     for output in rsp.outputs:
+        if args.finish_reason_sent.get(output.index, False):
+            continue
         delta_text = output.text_diff
-        if args.echo and args.first_iteration:
+        echo_prompt = args.echo and args.first_iteration
+        if (args.num_choices > 1 and not echo_prompt and not delta_text
+                and not output.token_ids_diff and output.finish_reason is None):
+            # A sibling candidate's step: nothing new for this choice. n == 1
+            # keeps emitting a chunk per response as before.
+            continue
+        if echo_prompt:
             delta_text = args.prompt + delta_text
+        if output.finish_reason is not None:
+            args.finish_reason_sent[output.index] = True
         choice = CompletionResponseStreamChoice(
             index=args.prompt_idx * args.num_choices + output.index,
             text=delta_text if args.detokenize else "",
