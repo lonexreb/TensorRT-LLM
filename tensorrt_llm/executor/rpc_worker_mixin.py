@@ -235,6 +235,9 @@ class RpcWorkerMixin:
             responses = super().await_responses(timeout=actual_timeout)
             responses = self._await_response_helper.process_and_handle_responses(responses)
             logger_debug(f"[worker] Fetched {len(responses)} responses", color="green")
+            # await_responses returns [] forever once the executor loop has
+            # crashed; the crash itself only lives in engine._event_loop_error.
+            self._report_event_loop_error()
 
         qsize = self._response_queue.qsize()
         logger_debug(f"[worker] RpcWorker returning {qsize} responses", color="yellow")
@@ -244,6 +247,39 @@ class RpcWorkerMixin:
             # The queue contains batches of responses, so extend the list
             all_responses.extend(self._response_queue.get())
         return all_responses
+
+    def _report_event_loop_error(self) -> bool:
+        """Turn a stashed executor-loop crash into ErrorResponses, once.
+
+        PyExecutor._event_loop_wrapper only stashes the exception on
+        ``engine._event_loop_error`` (a crashed rank must not run the
+        collectives that _handle_errors would) and ``await_responses`` then
+        returns ``[]`` for good. The ManagedThread path checks that stash after
+        every poll (AwaitResponseHelper.__call__); this RPC path never did, so
+        RPC and Ray clients hung on every pending request while the worker
+        spun. One ErrorResponse per pending client goes through the
+        deferred-error lane so it rides the normal batched response stream,
+        which also pops the worker-side result.
+        """
+        engine = getattr(self, "engine", None)
+        error = getattr(engine, "_event_loop_error", None)
+        if error is None or getattr(self, "_event_loop_error_reported", False):
+            return False
+        self._event_loop_error_reported = True
+        from .utils import ErrorResponse
+
+        pending = list(self._results)
+        logger.error(
+            f"[worker] Executor event loop crashed with {len(pending)} pending "
+            f"request(s): {error}"
+        )
+        error_msg = f"Event loop terminated with error: {error}"
+        for client_id in pending:
+            self._await_response_helper.temp_error_responses.put(
+                ErrorResponse(client_id=client_id, error_msg=error_msg, request_id=client_id)
+            )
+        self._await_response_helper.process_and_handle_responses([])
+        return True
 
     async def fetch_responses_async(self, timeout: Optional[float] = None) -> list:
         """Async version of fetch_responses using asyncio.to_thread."""
@@ -265,6 +301,14 @@ class RpcWorkerMixin:
             else:
                 # Small delay to prevent busy waiting when no responses
                 await asyncio.sleep(0)
+            if getattr(self, "_event_loop_error_reported", False):
+                # The crash batch above is the last thing this stream can
+                # carry. End it with an error (the RPC server forwards it as
+                # a stream error) so the client marks the engine dead instead
+                # of polling a dead executor forever.
+                raise RuntimeError(
+                    f"Event loop terminated with error: {self.engine._event_loop_error}"
+                )
         logger_debug(
             f"[worker] RpcWorker {self.rank} quitting fetch_responses_loop_async", color="yellow"
         )

@@ -13,7 +13,7 @@ from .request import GenerationRequest
 from .result import GenerationResult
 from .rpc import RPCClient
 from .rpc.rpc_common import get_unique_ipc_addr
-from .utils import ErrorResponse, is_llm_response
+from .utils import EngineDeadError, ErrorResponse, is_llm_response
 
 
 class RpcExecutorMixin:
@@ -165,7 +165,30 @@ class RpcExecutorMixin:
             logger.debug(f"{method_name} task cancelled")
         except Exception as e:
             logger.error(f"Error in {method_name}: {e}")
+            # The exception only ended the main-loop thread before: nothing
+            # reached _error_queue, so check_health() stayed green, submit()
+            # kept accepting, and every pending result waited forever on a
+            # stream nobody read. Errors during our own shutdown are expected.
+            if not self._shutdown_event.is_set():
+                self._fail_pending_results(e)
             raise
+
+    def _fail_pending_results(self, error: BaseException) -> None:
+        """Record a fatal transport error and wake every pending result.
+
+        Mirrors GenerationExecutorProxy._handle_worker_death: the error goes
+        on _error_queue (check_health() and the next _handle_background_error
+        see it) and EngineDeadError onto every pending result queue, so
+        callers blocked in queue.get() / aqueue.get() fail with the cause
+        instead of hanging.
+        """
+        self._error_queue.put_nowait(error)
+        dead_error = EngineDeadError(error)
+        for result in list(self._results.values()):
+            try:
+                result.queue.put(dead_error)
+            except Exception:  # noqa: BLE001 - one bad queue must not stop the sweep
+                pass
 
     async def _fetch_responses_loop_async(self):
         await self._generic_fetch_loop_async(

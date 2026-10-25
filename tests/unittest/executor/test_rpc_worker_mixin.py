@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import threading
 from queue import Queue
 
 import pytest
@@ -77,3 +79,55 @@ def test_fetch_responses_dispatches_engine_responses_and_submission_errors(
     assert responses[-1] is submission_error
     assert engine_responses == original_responses
     assert worker._await_response_helper.temp_error_responses.empty()
+
+
+class _CrashedEngineStub:
+    """What PyExecutor leaves behind after its event loop dies."""
+
+    def __init__(self, error):
+        self._event_loop_error = error
+
+
+def _crashed_worker(error):
+    worker = _RpcWorkerStub([])
+    worker.engine = _CrashedEngineStub(error)
+    worker._results = {7: object(), 9: object()}
+    worker.shutdown_event = threading.Event()
+    return worker
+
+
+def test_fetch_responses_reports_event_loop_crash_once():
+    """Pending clients get one ErrorResponse each; the crash is reported once."""
+    worker = _crashed_worker(RuntimeError("boom"))
+
+    responses = worker.fetch_responses(timeout=0.1)
+
+    assert [r.client_id for r in responses] == [7, 9]
+    assert all(isinstance(r, ErrorResponse) for r in responses)
+    assert all("boom" in r.error_msg for r in responses)
+    assert worker._event_loop_error_reported
+    # Nothing new on later polls: the clients already hold the error.
+    assert worker.fetch_responses(timeout=0.1) == []
+
+
+def test_fetch_responses_without_crash_reports_nothing():
+    worker = _RpcWorkerStub([])
+    worker.engine = _CrashedEngineStub(None)
+    worker._results = {7: object()}
+
+    assert worker.fetch_responses(timeout=0.1) == []
+    assert not getattr(worker, "_event_loop_error_reported", False)
+
+
+def test_fetch_responses_loop_ends_with_error_after_crash():
+    """The stream carries the crash batch, then fails instead of spinning."""
+    worker = _crashed_worker(RuntimeError("boom"))
+
+    async def run():
+        stream = worker.fetch_responses_loop_async()
+        batch = await stream.__anext__()
+        assert [r.client_id for r in batch] == [7, 9]
+        with pytest.raises(RuntimeError, match="boom"):
+            await stream.__anext__()
+
+    asyncio.run(run())

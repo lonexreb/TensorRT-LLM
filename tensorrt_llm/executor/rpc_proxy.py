@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 import threading
+import weakref
 from typing import List, Optional, Union
 
 from ..llmapi.mpi_session import (MpiPoolSession, MpiSession,
@@ -85,6 +86,20 @@ class GenerationExecutorRpcProxy(RpcExecutorMixin, GenerationExecutor):
         self.worker_futures = self.mpi_session.submit(RpcWorker.main_task,
                                                       rpc_addr=self.rpc_addr,
                                                       **self.worker_kwargs)
+        # A rank that raises inside RpcWorker.main_task was only noticed when
+        # shutdown() collected the futures, long after every client had hung.
+        # Mirror GenerationExecutorProxy.mpi_done_callback: fail pending
+        # results the moment a future completes with an exception.
+        self_ref = weakref.ref(self)
+
+        def worker_done_callback(future):
+            if future.exception() is None:
+                return
+            if (proxy := self_ref()) is not None:
+                proxy._fail_pending_results(future.exception())
+
+        for future in self.worker_futures:
+            future.add_done_callback(worker_done_callback)
 
     def _setup_mainloop_with_tasks(self):
         """Setup mainloop with tasks needed for RpcProxy.
