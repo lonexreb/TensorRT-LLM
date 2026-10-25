@@ -355,6 +355,18 @@ class ExecutorRequestQueue:
     def get_request_queue(self) -> queue.Queue[RequestQueueItem]:
         return self.request_queue
 
+    def discard_start_times(self, request_items: Iterable[RequestQueueItem]):
+        """Forget queue start times of items dropped before admission.
+
+        calculate_queue_latency pops an entry only when its request is
+        admitted; a request cancelled while still queued would otherwise
+        leave its (and its children's) entries behind for good.
+        """
+        for req_item in request_items:
+            self.start_times.pop(req_item.id, None)
+            for child_id in req_item.child_req_ids or ():
+                self.start_times.pop(child_id, None)
+
     def calculate_queue_latency(self, request_items: List[RequestQueueItem],
                                 now: float) -> float:
         if not self.enable_iter_perf_stats:

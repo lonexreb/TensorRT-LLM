@@ -35,6 +35,7 @@ from tensorrt_llm._torch.pyexecutor.engine.runners.encoder_decoder import Encode
 from tensorrt_llm._torch.pyexecutor.engine.runners.interface import ScheduledModelRunner
 from tensorrt_llm._torch.pyexecutor.executor_request_queue import (
     SHUTDOWN_REQUEST_ID,
+    ExecutorRequestQueue,
     RequestQueueItem,
 )
 from tensorrt_llm._torch.pyexecutor.kv_cache_load import KvLoadTracker
@@ -61,7 +62,8 @@ from tensorrt_llm._torch.pyexecutor.scheduler import (
     ScheduledRequests,
     SerializableSchedulerOutput,
 )
-from tensorrt_llm.bindings.executor import RequestType
+from tensorrt_llm.bindings import executor as trtllm
+from tensorrt_llm.bindings.executor import FinishReason, RequestType
 from tensorrt_llm.bindings.internal.batch_manager import LlmRequestType
 from tensorrt_llm.llmapi import DisaggScheduleStyle
 from tensorrt_llm.llmapi.llm_args import EncodeCudaGraphConfig, MTPDecodingConfig
@@ -1420,6 +1422,86 @@ def test_getter_methods(mock_executor):
     assert mock_executor.get_expected_num_active_requests() == 5
     assert mock_executor._get_new_active_requests_queue_latency() == 10.5
     assert mock_executor.get_waiting_queue_size() == 1
+
+
+def _bare_cancel_executor(rank=0):
+    """A PyExecutor with only what _handle_canceled_requests touches."""
+    executor = object.__new__(PyExecutor)
+    executor.dist = types.SimpleNamespace(
+        rank=rank, world_size=1, mapping=types.SimpleNamespace(tp_group=[0])
+    )
+    executor.enable_attention_dp = False
+    executor.gather_all_responses = False
+    executor.response_cv = threading.Condition()
+    executor.responses = {}
+    executor.result_wait_queues = {}
+    executor.active_requests = []
+    executor._kv_connector_moves_kv = False
+    executor.should_exclude_last_generation_logits = False
+    executor.executor_request_queue = ExecutorRequestQueue(
+        dist=Mock(rank=0), max_batch_size=8, enable_iter_perf_stats=True, batch_wait_timeout_ms=0.0
+    )
+    executor.waiting_queue = FCFSWaitingQueue()
+    executor.canceled_req_ids = []
+    return executor
+
+
+def _enqueue_queued_item(executor, *, num_return_sequences=1, client_id=11):
+    """Enqueue a real request and return its RequestQueueItem as the main loop would fetch it."""
+    request = trtllm.Request(
+        input_token_ids=[1, 2, 3],
+        max_tokens=4,
+        sampling_config=trtllm.SamplingConfig(num_return_sequences=num_return_sequences),
+        client_id=client_id,
+    )
+    with patch("time.time", return_value=1.0):
+        executor.executor_request_queue.enqueue_request(request)
+    return executor.executor_request_queue.request_queue.get_nowait()
+
+
+def test_cancel_while_queued_sends_terminal_cancelled_response():
+    """A request cancelled before admission must still complete on the client.
+
+    Only active requests were finished with CANCELLED; a queued one was just
+    removed, so its GenerationResult never got a final response and the
+    worker and the request queue kept its bookkeeping (start_times).
+    """
+    executor = _bare_cancel_executor()
+    item = _enqueue_queued_item(executor, num_return_sequences=2)
+    (child_id,) = item.child_req_ids
+    executor.waiting_queue.add_request(item)
+    executor.canceled_req_ids = [item.id]
+    assert set(executor.executor_request_queue.start_times) == {item.id, child_id}
+
+    PyExecutor._handle_canceled_requests(executor)
+
+    assert len(executor.waiting_queue) == 0
+    assert executor.canceled_req_ids == []
+    assert executor.executor_request_queue.start_times == {}
+    # One terminal response for the parent and one per child, all addressed
+    # to the parent request / client, all final with reason CANCELLED.
+    assert set(executor.responses) == {item.id, child_id}
+    for responses in executor.responses.values():
+        (response,) = responses
+        assert response.request_id == item.id
+        assert response.client_id == 11
+        assert response.result.is_final
+        response.result.deserialize()
+        assert response.result.finish_reasons == [FinishReason.CANCELLED]
+
+
+def test_cancel_while_queued_on_non_root_rank_drops_without_responding():
+    """Ranks that keep no responses still drop the item and its start times."""
+    executor = _bare_cancel_executor(rank=1)
+    item = _enqueue_queued_item(executor)
+    executor.waiting_queue.add_request(item)
+    executor.canceled_req_ids = [item.id]
+
+    PyExecutor._handle_canceled_requests(executor)
+
+    assert len(executor.waiting_queue) == 0
+    assert executor.executor_request_queue.start_times == {}
+    assert executor.responses == {}
 
 
 def _make_executor_with_kv_cache_manager(kv_cache_manager):

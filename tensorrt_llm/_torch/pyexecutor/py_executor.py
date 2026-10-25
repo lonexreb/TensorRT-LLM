@@ -15,7 +15,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from enum import IntEnum
 from queue import Queue
 from typing import (TYPE_CHECKING, Callable, Dict, Iterable, Iterator, List,
-                    Literal, Optional, Tuple, Union)
+                    Literal, Optional, Set, Tuple, Union)
 
 import torch
 from strenum import StrEnum
@@ -117,7 +117,8 @@ from .profiling import PROFILE_START_STOP_ENV_VAR_NAME, PyExecutorProfileManager
 from .profiling import load_iteration_indexes as _load_iteration_indexes
 from .request_utils import (RequestBroadcaster, attach_py_objects_to_requests,
                             derive_attention_dp_per_rank_request_cap,
-                            get_from_waiting_queue, merge_requests)
+                            get_from_waiting_queue, merge_requests,
+                            merge_requests_to_llm_requests)
 from .resource_manager import (NoFreeSlotsError, ResourceManager,
                                ResourceManagerType, request_context)
 from .sampler import (AsyncWorkerMixin, Sampler, SamplerEvent, SampleState,
@@ -9264,6 +9265,9 @@ class PyExecutor:
         # Create set from list of canceled request ids to speed up canceled test
         canceled_req_ids_set = set(self.canceled_req_ids)
 
+        # A request still in the waiting queue was never admitted, so no later
+        # path produces a response for it: answer it here before dropping it.
+        self._respond_to_canceled_waiting_requests(canceled_req_ids_set)
         # Remove canceled requests from the waiting queue
         self.waiting_queue.remove_by_ids(canceled_req_ids_set)
 
@@ -9292,6 +9296,78 @@ class PyExecutor:
         # Clear list of requests marked for cancellation and add back those that failed to cancel.
         self.canceled_req_ids.clear()
         self.canceled_req_ids.extend(still_pending_canceled_ids)
+
+    def _respond_to_canceled_waiting_requests(self,
+                                              canceled_req_ids_set: Set[int]):
+        """Send a terminal CANCELLED response for cancelled queued requests.
+
+        Only active requests go through finish_by_reason in
+        _handle_canceled_requests; a request cancelled while it still sat in
+        the waiting queue was silently removed, so its GenerationResult never
+        completed (the client hung) and the worker kept its _results entry
+        and the queue its start_times entry.
+
+        The waiting queue is replicated on every rank, so each rank that keeps
+        responses (rank 0, or all with gather_all_responses) can append its
+        own copy locally; no TP gather is needed, which keeps this off the
+        collective path that _enqueue_responses takes under attention DP.
+        """
+        canceled_items = [
+            item for item in self.waiting_queue
+            if item.id in canceled_req_ids_set
+        ]
+        if not canceled_items:
+            return
+        self.executor_request_queue.discard_start_times(canceled_items)
+        if self.dist.rank != 0 and not self.gather_all_responses:
+            return
+
+        responses = []
+        for item in canceled_items:
+            if item.request is None:
+                continue
+            try:
+                # Parent plus children, as admission would have built them.
+                for req in merge_requests_to_llm_requests(
+                    [item], self._should_exclude_last_generation_logits()):
+                    req.finish_by_reason(FinishReason.CANCELLED)
+                    req.decoding_iter = req.py_decoding_iter
+                    response = req.create_response()
+                    if response is not None:
+                        responses.append((req.py_request_id, response))
+            except Exception as e:  # noqa: BLE001 - the client must be unblocked
+                # Converting a queued request can fail for the same reasons
+                # admission would have; the client still needs a terminal
+                # response, so fall back to the error form used by
+                # _handle_errors for drained queue items.
+                logger.warning(
+                    f"Could not build a cancelled response for queued request "
+                    f"{item.id}, sending an error response instead: {e}")
+                responses.append(
+                    (item.id,
+                     LlmResponse(request_id=item.id,
+                                 error_msg="Request cancelled "
+                                 "before it was scheduled",
+                                 client_id=getattr(item.request, "client_id",
+                                                   None))))
+        self._append_responses(responses)
+
+    def _append_responses(self, responses: Iterable[Tuple[int, LlmResponse]]):
+        """Rank-local tail of _enqueue_responses: hand responses to waiters."""
+        with self.response_cv:
+            for req_id, resp in responses:
+                if req_id in self.responses.keys():
+                    self.responses[req_id].append(resp)
+                else:
+                    self.responses.update({req_id: [resp]})
+                # (TODO: joyang) There are other types of responses, we need to sort out.
+                if type(
+                        resp
+                ) == LlmResponse and req_id in self.result_wait_queues and self.result_wait_queues[
+                        req_id] is not None:
+                    self.result_wait_queues[req_id].put_response.remote(
+                        resp.client_id, resp)
+            self.response_cv.notify_all()
 
     @nvtx_range("_enqueue_responses")
     def _enqueue_responses(self, responses: Iterable[Tuple[int, LlmResponse]]):
@@ -9335,20 +9411,7 @@ class PyExecutor:
             f'after gather, rank = {self.dist.rank}, responses = {responses}')
 
         if self.dist.rank == 0 or self.gather_all_responses:
-            with self.response_cv:
-                for req_id, resp in responses:
-                    if req_id in self.responses.keys():
-                        self.responses[req_id].append(resp)
-                    else:
-                        self.responses.update({req_id: [resp]})
-                    # (TODO: joyang) There are other types of responses, we need to sort out.
-                    if type(
-                            resp
-                    ) == LlmResponse and req_id in self.result_wait_queues and self.result_wait_queues[
-                            req_id] is not None:
-                        self.result_wait_queues[req_id].put_response.remote(
-                            resp.client_id, resp)
-                self.response_cv.notify_all()
+            self._append_responses(responses)
         self._maybe_record_hang_diagnostic_phase("responses_enqueued")
 
     @nvtx_range("_handle_first_token_response")
