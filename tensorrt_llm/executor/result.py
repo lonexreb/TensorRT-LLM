@@ -1299,6 +1299,11 @@ class IterationResult:
             self.aqueue = None
 
     def set_timeout(self, timeout: float):
+        """Set how long iteration waits for the next item.
+
+        ``None`` waits indefinitely, a positive value waits up to that many
+        seconds, and ``0`` returns whatever is already queued without waiting.
+        """
         self._timeout = timeout
 
     def mark_undone(self):
@@ -1329,7 +1334,9 @@ class IterationResult:
         try:
             data = await self.aqueue.get(timeout=self._timeout)
             return json.loads(data)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.QueueEmpty):
+            # QueueEmpty is the non-blocking (timeout <= 0) counterpart of
+            # TimeoutError; either way there is nothing more to return.
             self._done = True
             raise StopAsyncIteration
 

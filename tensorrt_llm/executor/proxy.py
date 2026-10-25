@@ -1398,7 +1398,11 @@ class GenerationExecutorProxy(GenerationExecutor):
         for stat in stats:
             self._iter_stats_result.queue.put(stat)
 
-        self._iter_stats_result.set_timeout(timeout)
+        # The RPC above already waited up to `timeout`, and nothing else feeds
+        # this queue, so iterate without waiting again: with `timeout` here
+        # every consumer paid a second full `timeout` after draining the batch
+        # (GitHub issue #19623, the ~2 s /metrics floor).
+        self._iter_stats_result.set_timeout(0)
         return self._iter_stats_result
 
     def get_kv_events(self, timeout: float) -> List[dict]:
@@ -1449,7 +1453,8 @@ class GenerationExecutorProxy(GenerationExecutor):
         for event in events:
             self._iter_kv_events_result.queue.put(event)
 
-        self._iter_kv_events_result.set_timeout(timeout)
+        # Same as aget_stats: the batch is complete, do not wait again.
+        self._iter_kv_events_result.set_timeout(0)
         return self._iter_kv_events_result
 
     def __del__(self):
