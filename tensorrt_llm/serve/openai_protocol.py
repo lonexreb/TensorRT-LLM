@@ -1310,6 +1310,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
             raise ValueError("stream_options can only be set if stream is true")
         return values
 
+    @field_validator("messages")
+    @classmethod
+    def check_messages_not_empty(cls, messages):
+        # OpenAI rejects an empty array with a 400. Here it rendered a
+        # prompt with no turns (a 200 with unprompted output, or a template
+        # error) and with add_generation_prompt=False indexed messages[-1].
+        if not messages:
+            raise ValueError("'messages' must contain at least one message.")
+        return messages
+
     @model_validator(mode="before")
     @classmethod
     def check_tool_choice(cls, data):
