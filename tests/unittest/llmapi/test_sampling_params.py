@@ -277,6 +277,11 @@ def test_sampling_params_rejects_nan(field):
         ("min_p", -0.1),
         ("min_p", 1.1),
         ("temperature", -1.0),
+        ("n", 0),
+        ("n", -1),
+        ("best_of", 0),
+        ("seed", -1),
+        ("seed", 2**64),
     ],
 )
 def test_sampling_params_rejects_out_of_range(field, value):
@@ -295,6 +300,10 @@ def test_sampling_params_rejects_out_of_range(field, value):
         ("min_p", 1.0),
         ("temperature", 0.0),
         ("temperature", 1.0),
+        ("n", 1),
+        ("best_of", 1),
+        ("seed", 0),
+        ("seed", 2**64 - 1),
     ],
 )
 def test_sampling_params_accepts_in_range_values(field, value):

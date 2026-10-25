@@ -361,7 +361,9 @@ class SamplingParams:
         if self.pad_id is None:
             self.pad_id = self.end_id
 
-        self.best_of = self.best_of or self.n
+        # Only fill an unset best_of; an explicit 0 must reach _validate.
+        if self.best_of is None:
+            self.best_of = self.n
 
         if self.embedding_bias is not None:
             if isinstance(self.embedding_bias, torch.Tensor):
@@ -406,6 +408,18 @@ class SamplingParams:
             raise ValueError(
                 f"require top_p_reset_ids >= 0, got top_p_reset_ids={self.top_p_reset_ids}"
             )
+
+        # The C++ SamplingConfig rejects num_return_sequences/beam_width <= 0
+        # with a TLLM_CHECK at submit time (samplingConfig.cpp), and seed is a
+        # uint64 that nanobind refuses to convert from a negative or too-large
+        # int. Catch all three here so the user gets a field-named ValueError
+        # at construction instead of a C++ assertion or an overload dump.
+        if self.n < 1:
+            raise ValueError(f"require n >= 1, got n={self.n}")
+        if self.best_of is not None and self.best_of < 1:
+            raise ValueError(f"require best_of >= 1, got best_of={self.best_of}")
+        if self.seed is not None and not 0 <= self.seed < 2**64:
+            raise ValueError(f"require 0 <= seed < 2**64, got seed={self.seed}")
 
         if self.best_of is not None and self.best_of < self.n:
             raise ValueError(f"best_of ({self.best_of}) cannot be less than n ({self.n})")
