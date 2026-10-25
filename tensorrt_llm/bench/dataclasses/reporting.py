@@ -255,7 +255,13 @@ class StatsKeeper:
             generation_latency_percentiles=PercentileStats.from_iterable(
                 generation_latencies),
             token_percentiles=PercentileStats.from_iterable(output_tokens),
-            issue_rate_ns=queue_time_total / num_requests,
+            # Requests per nanosecond over the issue window; convert_rate_to_s
+            # scales it to req/s. Dividing the other way gave ns per request,
+            # which that scaling then inflated by 1e18 (e.g. 7.6753E+14 req/s).
+            # A single request has no window, so report 0 rather than divide
+            # by zero.
+            issue_rate_ns=(num_requests /
+                           queue_time_total if queue_time_total > 0 else 0.0),
             acceptance_length=global_acceptance_length,
             num_draft_tokens_percentiles=num_draft_tokens_percentiles,
             num_accepted_draft_tokens_percentiles=

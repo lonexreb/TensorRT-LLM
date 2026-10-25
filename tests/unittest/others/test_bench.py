@@ -193,15 +193,15 @@ def test_mismatched_weights_length_raises():
         PercentileStats.from_iterable([1.0, 2.0, 3.0], weights=[1.0, 2.0])
 
 
-def _perf_item(rid, num_out, decoding_iteration):
+def _perf_item(rid, num_out, decoding_iteration, start=0):
     """Build a final PerfItemTuple for a single request.
 
     ``num_total_output_tokens`` is ``len(tokens)``, so ``tokens`` is sized to
     ``num_out``; ``decoding_iteration`` maps onto ``RequestRecord.decode_iteration``.
     """
     return PerfItemTuple(
-        start_timestamp=0,
-        end_timestamp=1000,
+        start_timestamp=start,
+        end_timestamp=start + 1000,
         request_id=rid,
         num_input_tokens=8,
         response_is_final=True,
@@ -236,3 +236,29 @@ def test_acceptance_length_weighted_by_iterations():
     # (= sum(output_tokens) / total_decoding_iterations). This would fail under
     # output-token weighting.
     assert stats.acceptance_length_percentiles.average == pytest.approx(stats.acceptance_length)
+
+
+def test_issue_rate_is_requests_per_second():
+    """issue_rate_ns is a rate (requests per ns), so x1e9 gives req/s.
+
+    Three requests issued 1 ms apart span 2 ms: 1500 req/s. The previous
+    period-over-count formula produced ~6.7e14 for the same input.
+    """
+    keeper = StatsKeeper()
+    for rid in range(3):
+        keeper.register_request_perf_item(
+            _perf_item(rid, num_out=4, decoding_iteration=3, start=rid * 1_000_000)
+        )
+
+    stats = keeper.generate_statistics_summary(max_draft_tokens=0, batch_size=1)
+
+    assert stats.issue_rate_ns * 1e9 == pytest.approx(1500.0)
+
+
+def test_issue_rate_single_request_is_zero_not_division_error():
+    keeper = StatsKeeper()
+    keeper.register_request_perf_item(_perf_item(0, num_out=4, decoding_iteration=3))
+
+    stats = keeper.generate_statistics_summary(max_draft_tokens=0, batch_size=1)
+
+    assert stats.issue_rate_ns == 0.0
