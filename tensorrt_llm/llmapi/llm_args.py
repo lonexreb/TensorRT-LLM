@@ -3299,6 +3299,11 @@ class PARDDecodingConfig(DecodingBaseConfig):
 
     @model_validator(mode="after")
     def set_max_total_draft_tokens(self):
+        # Checked here, where pydantic reports it as a ValidationError on
+        # speculative_config.max_draft_len; the field defaults to None and
+        # comparing None in a later assert raised a bare TypeError instead.
+        if self.max_draft_len is None or self.max_draft_len <= 0:
+            raise ValueError("max_draft_len must be > 0 for PARD")
         self.max_total_draft_tokens = self.max_draft_len
         return self
 
@@ -3528,6 +3533,11 @@ class DFlashDecodingConfig(DecodingBaseConfig):
 
     @model_validator(mode="after")
     def set_max_total_draft_tokens(self):
+        # Checked here, where pydantic reports it as a ValidationError on
+        # speculative_config.max_draft_len; the field defaults to None and
+        # comparing None in a later assert raised a bare TypeError instead.
+        if self.max_draft_len is None or self.max_draft_len <= 0:
+            raise ValueError("max_draft_len must be > 0 for DFlash")
         self.max_total_draft_tokens = self.max_draft_len
         return self
 
@@ -7532,9 +7542,6 @@ class TorchLlmArgs(BaseLlmArgs):
                 # DraftTarget one-model) share the SpecMetadata slot-indexed
                 # dispatch.
 
-            if isinstance(self.speculative_config, PARDDecodingConfig):
-                assert self.speculative_config.max_draft_len > 0, "PARD max_draft_len must be > 0"
-
             if isinstance(self.speculative_config, DFlashDecodingConfig):
                 if (self.cache_transceiver_config is not None
                         and self.cache_transceiver_config.backend is not None):
@@ -7552,7 +7559,6 @@ class TorchLlmArgs(BaseLlmArgs):
                         "server drafts without the prompt context. Output is "
                         "unaffected; expect a lower acceptance rate than the "
                         "same configuration run aggregated.")
-                assert self.speculative_config.max_draft_len > 0, "DFlash max_draft_len must be > 0"
                 # A Hugging Face repo id is not readable yet: both calls below
                 # then run without the drafter's config.json (the budget check
                 # covers only the token budget), and CachedModelLoader repeats

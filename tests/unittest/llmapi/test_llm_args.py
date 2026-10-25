@@ -58,7 +58,8 @@ from tensorrt_llm.llmapi.llm_args import (BaseLlmArgs, BlockReuseConfig,
                                           MoeConfig, MTPDecodingConfig,
                                           MultimodalConfig,
                                           MultimodalEncoderCudaGraphConfig,
-                                          NGramDecodingConfig, PeftCacheConfig,
+                                          NGramDecodingConfig,
+                                          PARDDecodingConfig, PeftCacheConfig,
                                           PrefillCudaGraphBackend, PybindMirror,
                                           RayPlacementConfig,
                                           SkipSoftmaxAttentionConfig,
@@ -361,6 +362,31 @@ def test_disagg_config_without_dflash_allowed(
     assert args.cache_transceiver_config.backend == "NIXL"
     assert not any("DFlash acceptance is degraded" in call.args[0]
                    for call in warning.call_args_list)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("config_cls",
+                         [PARDDecodingConfig, DFlashDecodingConfig])
+@pytest.mark.parametrize("max_draft_len", [None, 0])
+def test_parallel_draft_requires_positive_max_draft_len(
+        tmp_path: Path, config_cls: type[DecodingBaseConfig],
+        max_draft_len: int | None) -> None:
+    # max_draft_len defaults to None; previously PARD/DFlash only checked it
+    # in a TorchLlmArgs assert, so None surfaced as a bare TypeError from the
+    # comparison and 0 slipped through under python -O.
+    kwargs = {} if max_draft_len is None else {"max_draft_len": max_draft_len}
+    with pytest.raises(ValidationError, match="max_draft_len"):
+        config_cls(speculative_model=str(tmp_path), **kwargs)
+
+    decoding_type = config_cls.model_fields["decoding_type"].default
+    with pytest.raises(ValidationError, match="max_draft_len"):
+        TorchLlmArgs(model=tmp_path,
+                     gpus_per_node=1,
+                     speculative_config={
+                         "decoding_type": decoding_type,
+                         "speculative_model": str(tmp_path),
+                         **kwargs,
+                     })
 
 
 @pytest.mark.cpu_only
