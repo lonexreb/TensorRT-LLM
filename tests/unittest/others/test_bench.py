@@ -18,7 +18,9 @@ from unittest import mock
 
 import pytest
 
+from tensorrt_llm.bench.benchmark.utils.general import get_settings
 from tensorrt_llm.bench.dataclasses.configuration import RuntimeConfig
+from tensorrt_llm.bench.dataclasses.general import DatasetMetadata
 from tensorrt_llm.bench.dataclasses.reporting import PerfItemTuple, ReportUtility, StatsKeeper
 from tensorrt_llm.bench.dataclasses.statistics import PercentileStats
 from tensorrt_llm.bench.utils import VALID_QUANT_ALGOS
@@ -236,3 +238,52 @@ def test_acceptance_length_weighted_by_iterations():
     # (= sum(output_tokens) / total_decoding_iterations). This would fail under
     # output-token weighting.
     assert stats.acceptance_length_percentiles.average == pytest.approx(stats.acceptance_length)
+
+
+def _settings_params(**overrides):
+    # max_batch_size and max_num_tokens both given: get_settings takes the
+    # user-provided branch and never loads a model.
+    params = {
+        "max_batch_size": 8,
+        "max_num_tokens": 64,
+        "enable_chunked_context": True,
+        "tp": 1,
+        "pp": 1,
+        "ep": None,
+        "cluster_size": None,
+        "gpus_per_node": None,
+        "backend": "pytorch",
+    }
+    params.update(overrides)
+    return params
+
+
+def _long_isl_metadata():
+    return DatasetMetadata(
+        isl_stats=PercentileStats.from_iterable([1000]),
+        osl_stats=PercentileStats.from_iterable([10]),
+        seq_len_stats=PercentileStats.from_iterable([1010]),
+        num_requests=1,
+    )
+
+
+def test_get_settings_honors_enable_chunked_context_flag():
+    """With --enable_chunked_context the user's max_num_tokens is kept.
+
+    get_settings used to read params["enable_chunked_prefill"], a key the CLI
+    never sets, so chunked prefill looked disabled and the ISL floor applied.
+    """
+    settings = get_settings(_settings_params(), _long_isl_metadata(), "model", None)
+
+    assert settings["settings_config"]["max_num_tokens"] == 64
+    assert settings["settings_config"]["chunking"] is True
+
+
+def test_get_settings_floors_max_num_tokens_when_chunking_disabled():
+    settings = get_settings(
+        _settings_params(enable_chunked_context=False), _long_isl_metadata(), "model", None
+    )
+
+    # max_isl + max_batch_size
+    assert settings["settings_config"]["max_num_tokens"] == 1000 + 8
+    assert settings["settings_config"]["chunking"] is False
