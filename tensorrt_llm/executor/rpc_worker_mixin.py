@@ -270,8 +270,7 @@ class RpcWorkerMixin:
 
         pending = list(self._results)
         logger.error(
-            f"[worker] Executor event loop crashed with {len(pending)} pending "
-            f"request(s): {error}"
+            f"[worker] Executor event loop crashed with {len(pending)} pending request(s): {error}"
         )
         error_msg = f"Event loop terminated with error: {error}"
         for client_id in pending:
