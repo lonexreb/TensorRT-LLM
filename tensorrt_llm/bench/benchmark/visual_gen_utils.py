@@ -247,6 +247,11 @@ def load_visual_gen_prompts(
     return [VisualGenSampleRequest(prompt=p) for p in prompts]
 
 
+# Per-request arrays emitted by ``build_visual_gen_result_dict``; saved results
+# keep them only when ``--save_detailed`` is set.
+PER_REQUEST_RESULT_KEYS = ("latencies", "generations", "errors")
+
+
 def build_visual_gen_result_dict(
     backend: str,
     model_id: str,

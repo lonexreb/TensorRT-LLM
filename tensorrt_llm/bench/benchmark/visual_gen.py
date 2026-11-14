@@ -31,6 +31,7 @@ from typing import Optional
 import click
 
 from tensorrt_llm.bench.benchmark.visual_gen_utils import (
+    PER_REQUEST_RESULT_KEYS,
     VisualGenBenchmarkMetrics,
     VisualGenRequestOutput,
     build_visual_gen_result_dict,
@@ -152,7 +153,7 @@ def _parse_size(size_str: str) -> tuple[Optional[int], Optional[int]]:
     "--save_detailed",
     is_flag=True,
     default=False,
-    help="Include per-request details (latencies, errors) in saved results.",
+    help="Include per-request details (latencies, generations, errors) in saved results.",
 )
 @click.option(
     "--result_dir",
@@ -479,7 +480,7 @@ def _save_results(
     result_json["num_gpus"] = num_gpus
 
     if not save_detailed:
-        for field_name in ["e2e_latencies", "errors"]:
+        for field_name in PER_REQUEST_RESULT_KEYS:
             result_json.pop(field_name, None)
 
     base_model_id = model_id.split("/")[-1]
