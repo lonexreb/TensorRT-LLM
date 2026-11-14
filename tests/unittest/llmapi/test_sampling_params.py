@@ -19,11 +19,13 @@ import pickle
 from dataclasses import fields
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
-from tensorrt_llm.llmapi.llm import BaseLLM
+from tensorrt_llm.disaggregated_params import DisaggregatedParams
+from tensorrt_llm.llmapi.llm import BaseLLM, RequestOutput
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 from tensorrt_llm.llmapi.thinking_budget import (
     ThinkingBudgetLogitsProcessor,
@@ -634,3 +636,42 @@ def test_prepare_sampling_params_generation_config_eos_only_for_default_end_id(e
     else:
         assert sampling_params.end_id == -1
         assert sampling_params.stop_token_ids is None
+
+
+def test_context_only_request_does_not_mutate_caller_sampling_params():
+    # Disaggregated callers often reuse one SamplingParams for the context-only
+    # and the generation-only request. The context-only max_tokens=1 override
+    # must not leak into the caller's object.
+    llm = _TestLLM()
+    llm._encode_only = False
+    llm._tokenizer = _WordTokenizer()
+    llm._hf_model_config = None
+    llm._generation_config = None
+    llm._generation_config_explicit_values = {}
+    llm._executor = MagicMock()
+    llm._executor.is_shutdown.return_value = False
+    llm._preprocess = MagicMock(return_value=([1, 2, 3], None, None, None))
+    llm._check_arguments = MagicMock()
+    llm._post_processor_hook = None  # set by BaseLLM.__init__, which _TestLLM skips
+
+    sampling_params = SamplingParams(max_tokens=64, stop="STOP")
+
+    def forwarded_sampling_params(request_type):
+        with patch.object(RequestOutput, "_from_generation_result"):
+            llm.generate_async(
+                [1, 2, 3],
+                sampling_params,
+                disaggregated_params=DisaggregatedParams(request_type=request_type),
+            )
+        return llm._executor.generate_async.call_args.kwargs["sampling_params"]
+
+    ctx_sampling_params = forwarded_sampling_params("context_only")
+    assert ctx_sampling_params is not sampling_params
+    assert ctx_sampling_params.max_tokens == 1
+    # The copy keeps the request state set up by _prepare_sampling_params.
+    assert ctx_sampling_params._get_stop_words() == [[3]]
+    assert ctx_sampling_params.end_id == _WordTokenizer.eos_token_id
+    assert sampling_params.max_tokens == 64
+
+    gen_sampling_params = forwarded_sampling_params("generation_only")
+    assert gen_sampling_params.max_tokens == 64

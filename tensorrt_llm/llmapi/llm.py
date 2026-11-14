@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import atexit
+import copy
 import os
 import socket
 import threading
@@ -882,6 +883,9 @@ class BaseLLM:
         is_gen_only = disaggregated_params is not None and disaggregated_params.request_type == "generation_only"
 
         if is_ctx_only:
+            # Override a copy: callers commonly reuse the same SamplingParams for
+            # the generation-only request, which must keep its own max_tokens.
+            sampling_params = copy.copy(sampling_params)
             sampling_params.max_tokens = 1
             self._configure_bart_decoder_prefix(sampling_params)
 
