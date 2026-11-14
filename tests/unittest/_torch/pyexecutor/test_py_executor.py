@@ -38,6 +38,7 @@ from tensorrt_llm._torch.pyexecutor.engine.runners.encoder_decoder import Encode
 from tensorrt_llm._torch.pyexecutor.engine.runners.interface import ScheduledModelRunner
 from tensorrt_llm._torch.pyexecutor.executor_request_queue import (
     SHUTDOWN_REQUEST_ID,
+    ExecutorRequestQueue,
     RequestQueueItem,
 )
 from tensorrt_llm._torch.pyexecutor.kv_cache_load import KvLoadTracker
@@ -72,7 +73,7 @@ from tensorrt_llm._torch.pyexecutor.scheduler import (
 from tensorrt_llm._torch.pyexecutor.scheduler.scheduler import (
     split_encoder_from_decoder_context_requests,
 )
-from tensorrt_llm.bindings.executor import RequestType
+from tensorrt_llm.bindings.executor import Request, RequestType
 from tensorrt_llm.bindings.internal.batch_manager import LlmRequestType
 from tensorrt_llm.llmapi import DisaggScheduleStyle
 from tensorrt_llm.llmapi.llm_args import EncodeCudaGraphConfig, MTPDecodingConfig
@@ -3699,6 +3700,81 @@ def test_non_adp_fetch_pops_a_full_batch_beside_retiring_requests(
     assert [item.id for item in waiting_queue] == [10, 11, 12, 13][len(expected_admitted_ids) :]
     assert live == [4]
     assert stub.num_fetch_requests == len(expected_admitted_ids)
+
+
+def _make_enqueue_capacity_executor(
+    max_num_active_requests: int, enable_attention_dp: bool = False, tp_size: int = 1
+) -> PyExecutor:
+    """Build a PyExecutor with a real request queue and a fixed admission capacity."""
+    executor = object.__new__(PyExecutor)
+    executor.enable_attention_dp = enable_attention_dp
+    executor.max_num_active_requests = max_num_active_requests
+    executor.dist = types.SimpleNamespace(rank=0, tp_size=tp_size)
+    executor.response_cv = threading.Condition()
+    executor.result_wait_queues = {}
+    executor.executor_request_queue = ExecutorRequestQueue(
+        dist=executor.dist,
+        max_batch_size=max_num_active_requests,
+        enable_iter_perf_stats=False,
+        batch_wait_timeout_ms=0,
+    )
+    return executor
+
+
+def _make_enqueue_capacity_request(num_return_sequences: int, beam_width: int = 1) -> Request:
+    return Request(
+        input_token_ids=[1, 2, 3],
+        max_tokens=4,
+        sampling_config=SamplingConfig(
+            beam_width=beam_width, num_return_sequences=num_return_sequences
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("enable_attention_dp", "tp_size", "num_return_sequences"),
+    [(False, 1, 3), (True, 2, 5)],
+)
+def test_enqueue_rejects_request_with_more_sequences_than_admission_capacity(
+    enable_attention_dp, tp_size, num_return_sequences
+):
+    """A parent and its children are admitted together; a request needing more
+    sequences than the admission capacity would block the waiting queue forever,
+    so it must fail at enqueue time instead."""
+    executor = _make_enqueue_capacity_executor(
+        max_num_active_requests=2, enable_attention_dp=enable_attention_dp, tp_size=tp_size
+    )
+    too_large = _make_enqueue_capacity_request(num_return_sequences)
+
+    with pytest.raises(ValueError, match="admits at most"):
+        executor.enqueue_request(too_large)
+    with pytest.raises(ValueError, match="admits at most"):
+        executor.enqueue_requests([_make_enqueue_capacity_request(1), too_large])
+
+    # Neither call enqueued anything, including the fitting request of the batch.
+    assert executor.executor_request_queue.request_queue.qsize() == 0
+
+
+@pytest.mark.parametrize(
+    ("enable_attention_dp", "tp_size", "num_return_sequences", "beam_width"),
+    [
+        (False, 1, 2, 1),  # Exactly fills the admission capacity.
+        (True, 2, 4, 1),  # Attention DP admits tp_size * max_num_active_requests.
+        (False, 1, 4, 4),  # Beam search has no child requests.
+    ],
+)
+def test_enqueue_accepts_request_within_admission_capacity(
+    enable_attention_dp, tp_size, num_return_sequences, beam_width
+):
+    executor = _make_enqueue_capacity_executor(
+        max_num_active_requests=2, enable_attention_dp=enable_attention_dp, tp_size=tp_size
+    )
+    request = _make_enqueue_capacity_request(num_return_sequences, beam_width)
+
+    executor.enqueue_request(request)
+    executor.enqueue_requests([request])
+
+    assert executor.executor_request_queue.request_queue.qsize() == 2
 
 
 def test_generic_disagg_adp_mixed_rank_states_stay_queueable():

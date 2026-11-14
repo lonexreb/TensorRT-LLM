@@ -81,6 +81,7 @@ def executor() -> PyExecutor:
     engine.responses = {}
     engine.result_wait_queues = {}
     engine.enable_attention_dp = False
+    engine.max_num_active_requests = 8
     engine.gather_all_responses = False
     engine.kv_connector_manager = None
     engine.kv_cache_transceiver = SimpleNamespace(_fp4_mla_bridge_enabled=False)

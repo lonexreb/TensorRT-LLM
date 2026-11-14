@@ -127,7 +127,8 @@ from .profiling import PROFILE_START_STOP_ENV_VAR_NAME, PyExecutorProfileManager
 from .profiling import load_iteration_indexes as _load_iteration_indexes
 from .request_utils import (RequestBroadcaster,
                             derive_attention_dp_per_rank_request_cap,
-                            get_from_waiting_queue, merge_requests)
+                            get_from_waiting_queue, get_num_child_requests,
+                            merge_requests)
 from .resource_manager import (NoFreeSlotsError, ResourceManager,
                                ResourceManagerType, is_context_only_kv_cache,
                                request_context)
@@ -2463,6 +2464,8 @@ class PyExecutor:
         """
         Enqueue new requests
         """
+        for request in requests:
+            self._validate_request_admission_capacity(request)
         req_ids = self.executor_request_queue.enqueue_requests(requests)
         if result_wait_queue is not None:
             with self.response_cv:
@@ -3046,6 +3049,7 @@ class PyExecutor:
         """
         Enqueue a new request.
         """
+        self._validate_request_admission_capacity(request)
         req_id = self.executor_request_queue.enqueue_request(request)
         if result_wait_queue is not None:
             with self.response_cv:
@@ -8847,6 +8851,24 @@ class PyExecutor:
         if self.enable_attention_dp:
             return self.dist.tp_size * self.max_num_active_requests
         return self.max_num_active_requests
+
+    def _validate_request_admission_capacity(self,
+                                             request: ExecutorRequest) -> None:
+        """Reject a request whose sequences can never be admitted together.
+
+        The waiting queue admits a request together with all of its child
+        requests. A request needing more sequences than the admission capacity
+        would stay at the head of the waiting queue forever and block every
+        request queued behind it, so fail it before it is enqueued.
+        """
+        num_sequences = 1 + get_num_child_requests(request)
+        admission_capacity = self._get_request_admission_capacity()
+        if num_sequences > admission_capacity:
+            raise ValueError(
+                f"num_return_sequences ({num_sequences}, from n/best_of) "
+                f"needs {num_sequences} concurrently active sequences, but "
+                f"the executor admits at most {admission_capacity}; lower "
+                f"n/best_of or increase max_batch_size.")
 
     def _configure_benchmark_req_queues_size(self) -> None:
         """Clamp the benchmark fill target to the request admission ceiling."""
