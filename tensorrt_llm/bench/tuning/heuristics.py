@@ -232,7 +232,9 @@ def finetune_setting(
 
     # Fine-tune the max batch size.
     if disable_optimistic_tuning:
-        max_bs = 2 * math.floor(raw_bs / 2)
+        # Round down to an even value, but never below 1: a positive raw
+        # batch size under 2 would otherwise round down to 0.
+        max_bs = max(1, 2 * math.floor(raw_bs / 2))
     else:
         # Set min BS to be 64.
         if raw_bs < 256:

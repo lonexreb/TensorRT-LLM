@@ -505,3 +505,30 @@ def test_calc_engine_setting_sizes_unset_ssm_cache_dtype_from_model_dtype(monkey
     for unset in (None, "auto"):
         assert engine_setting(unset, "bfloat16") == bf16_setting
         assert engine_setting(unset, "float32") == fp32_setting
+
+
+@pytest.mark.parametrize(
+    "kv_cache_max_requests, pp_size",
+    [(1.5, 1), (3.9, 2), (7, 4)],
+)
+def test_finetune_setting_hybrid_small_cache_keeps_positive_batch_size(
+    kv_cache_max_requests, pp_size
+):
+    """Even-rounding for hybrid models must not turn a positive batch size into 0."""
+    max_batch_size, max_num_tokens = heuristics.finetune_setting(
+        kv_cache_max_requests,
+        input_len=128,
+        output_len=128,
+        pp_size=pp_size,
+        disable_optimistic_tuning=True,
+    )
+    assert max_batch_size == 1
+    assert max_num_tokens == 2048
+
+
+def test_finetune_setting_hybrid_keeps_even_rounding():
+    """Batch sizes of 2 or more still round down to an even value."""
+    max_batch_size, _ = heuristics.finetune_setting(
+        101.7, input_len=128, output_len=128, pp_size=1, disable_optimistic_tuning=True
+    )
+    assert max_batch_size == 100
