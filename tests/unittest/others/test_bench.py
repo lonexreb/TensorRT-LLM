@@ -22,7 +22,9 @@ from unittest import mock
 import pynvml
 import pytest
 
+from tensorrt_llm.bench.benchmark.utils import general as bench_general
 from tensorrt_llm.bench.dataclasses.configuration import RuntimeConfig
+from tensorrt_llm.bench.dataclasses.general import DatasetMetadata
 from tensorrt_llm.bench.dataclasses.reporting import PerfItemTuple, ReportUtility, StatsKeeper
 from tensorrt_llm.bench.dataclasses.statistics import PercentileStats
 from tensorrt_llm.bench.tuning import heuristics
@@ -505,3 +507,35 @@ def test_calc_engine_setting_sizes_unset_ssm_cache_dtype_from_model_dtype(monkey
     for unset in (None, "auto"):
         assert engine_setting(unset, "bfloat16") == bf16_setting
         assert engine_setting(unset, "float32") == fp32_setting
+
+
+@pytest.mark.parametrize(
+    ("targets", "expected_lengths"),
+    [
+        ({}, (512, 128)),
+        ({"target_input_len": 8192, "target_output_len": 256}, (8192, 256)),
+        ({"target_input_len": None, "target_output_len": 256}, (512, 256)),
+    ],
+    ids=["dataset-averages", "user-targets", "output-target-only"],
+)
+def test_get_settings_tunes_for_target_lengths(monkeypatch, targets, expected_lengths):
+    """--target_input_len/--target_output_len must reach the tuning heuristic."""
+    metadata = DatasetMetadata(
+        isl_stats=PercentileStats.from_iterable([256, 768]),
+        osl_stats=PercentileStats.from_iterable([128, 128]),
+        seq_len_stats=PercentileStats.from_iterable([384, 896]),
+        num_requests=2,
+    )
+    engine_settings = mock.Mock(return_value=(64, 4096))
+    monkeypatch.setattr(bench_general, "get_model_config", mock.Mock())
+    monkeypatch.setattr(bench_general, "validate_and_set_kv_cache_quant", mock.Mock())
+    monkeypatch.setattr(bench_general, "get_benchmark_engine_settings", engine_settings)
+    params = {"tp": 1, "pp": 1, "ep": None, "cluster_size": None, "gpus_per_node": 1, **targets}
+
+    with mock.patch("tensorrt_llm._torch.model_config.ModelConfig.from_pretrained"):
+        settings = bench_general.get_settings(params, metadata, "dummy/model", None)
+
+    engine_settings.assert_called_once()
+    assert engine_settings.call_args.args[4:6] == expected_lengths
+    assert settings["settings_config"]["max_batch_size"] == 64
+    assert settings["settings_config"]["max_num_tokens"] == 4096

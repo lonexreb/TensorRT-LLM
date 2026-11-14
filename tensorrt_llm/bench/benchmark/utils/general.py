@@ -100,13 +100,19 @@ def get_settings(params: dict, dataset_metadata: DatasetMetadata, model: str,
 
         validate_and_set_kv_cache_quant(tllm_model_config, kv_cache_dtype)
 
+        # Honor --target_input_len/--target_output_len when given; otherwise
+        # tune for the dataset averages.
+        target_input_len = (params.get("target_input_len")
+                            or dataset_metadata.avg_isl)
+        target_output_len = (params.get("target_output_len")
+                             or dataset_metadata.avg_osl)
         max_batch_size, max_num_tokens = get_benchmark_engine_settings(
             model_config,
             tllm_model_config.quant_config,
             params.get("tp"),
             params.get("pp"),
-            dataset_metadata.avg_isl,
-            dataset_metadata.avg_osl,
+            target_input_len,
+            target_output_len,
             params.get("kv_cache_free_gpu_mem_fraction"),
             enable_attention_dp=enable_attention_dp,
         )
