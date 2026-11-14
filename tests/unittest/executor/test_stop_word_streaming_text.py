@@ -270,3 +270,106 @@ def test_trimmed_candidate_is_decoded_once_when_siblings_stream_on(tokenizer, mo
     assert full_decodes == [THAI_GENERATED[:-3]]
     assert second.text == "ข้อ <answer>42"
     assert second.finish_reason == "length"
+
+
+# "2</ans" spans the "42", "</" and "answer" tokens, so the engine, which
+# matches stop words by token id, never stops on it; only the text check does.
+# The text holds it once the "answer" token arrives.
+TEXT_ONLY_STOP = "2</ans"
+TEXT_ONLY_STOP_TOKENS = [7, 8, 9, 10]
+
+
+def _spy_abort(result, monkeypatch, error=None):
+    """Record the token ids at each abort() call, then run the real abort unless error is given."""
+    calls = []
+    real_abort = result.abort
+
+    def abort():
+        calls.append(list(result.outputs[0].token_ids))
+        if error is not None:
+            raise error
+        real_abort()
+
+    monkeypatch.setattr(result, "abort", abort)
+    return calls
+
+
+def _stream(result, token_ids, final_finish_reason):
+    """Feed one response per token; stop once the result is done."""
+    for index, token_id in enumerate(token_ids):
+        is_final = index == len(token_ids) - 1
+        result._handle_response(
+            _response(
+                [token_id],
+                is_final,
+                final_finish_reason if is_final else tllm.FinishReason.NOT_FINISHED,
+            )
+        )
+        if result._done:
+            break
+
+
+def test_text_only_stop_aborts_engine_request(tokenizer, monkeypatch):
+    """A stop string found only in the text ends a still-running engine request once."""
+    result = DetokenizedGenerationResultBase(
+        0, _sampling_params(TEXT_ONLY_STOP, [0]), tokenizer=tokenizer, streaming=True
+    )
+    abort_calls = _spy_abort(result, monkeypatch)
+
+    # The engine would run on to max_tokens after the stop string.
+    _stream(result, ANSWER_GENERATED, tllm.FinishReason.LENGTH)
+
+    output = result.outputs[0]
+    assert abort_calls == [TEXT_ONLY_STOP_TOKENS]
+    # Flags should_abort on the postprocess-worker path without touching the
+    # finish reason the client sees.
+    assert result.aborted()
+    assert result._done
+    assert output.finish_reason == "stop"
+    assert output.stop_reason == TEXT_ONLY_STOP
+    assert output.text == "<answer>4"
+
+
+def test_text_only_stop_on_final_response_does_not_abort(tokenizer, monkeypatch):
+    """The engine has already finished the request, so there is nothing to cancel."""
+    result = DetokenizedGenerationResultBase(
+        0, _sampling_params(TEXT_ONLY_STOP, [0]), tokenizer=tokenizer, streaming=True
+    )
+    abort_calls = _spy_abort(result, monkeypatch)
+
+    _stream(result, TEXT_ONLY_STOP_TOKENS, tllm.FinishReason.LENGTH)
+
+    output = result.outputs[0]
+    assert abort_calls == []
+    assert not result.aborted()
+    assert output.finish_reason == "stop"
+    assert output.stop_reason == TEXT_ONLY_STOP
+    assert output.text == "<answer>4"
+
+
+def test_no_stop_string_does_not_abort(tokenizer, monkeypatch):
+    result = DetokenizedGenerationResultBase(
+        0, _sampling_params("</b>", [0]), tokenizer=tokenizer, streaming=True
+    )
+    abort_calls = _spy_abort(result, monkeypatch)
+
+    _stream(result, ANSWER_GENERATED, tllm.FinishReason.LENGTH)
+
+    assert abort_calls == []
+    assert result.outputs[0].finish_reason == "length"
+    assert result.outputs[0].text == "<answer>42</answer>"
+
+
+def test_failed_abort_still_stops_on_text(tokenizer, monkeypatch):
+    """A failed cancel is logged; the request still ends on the stop string."""
+    result = DetokenizedGenerationResultBase(
+        0, _sampling_params(TEXT_ONLY_STOP, [0]), tokenizer=tokenizer, streaming=True
+    )
+    abort_calls = _spy_abort(result, monkeypatch, error=RuntimeError("executor is gone"))
+
+    _stream(result, ANSWER_GENERATED, tllm.FinishReason.LENGTH)
+
+    assert abort_calls == [TEXT_ONLY_STOP_TOKENS]
+    assert result._done
+    assert result.outputs[0].finish_reason == "stop"
+    assert result.outputs[0].text == "<answer>4"

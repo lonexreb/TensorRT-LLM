@@ -1082,6 +1082,7 @@ class DetokenizedGenerationResultBase(GenerationResultBase):
         # ``detokenize=False``.
         if (self.sampling_params.detokenize or self._post_processor_hook
                 is not None) and self.tokenizer is not None:
+            stopped_while_generating = False
             for beam_output in self.outputs:
                 beam_output._last_text_len = len(beam_output.text)
                 # A stop word matched by token id is trimmed from token_ids in
@@ -1135,10 +1136,23 @@ class DetokenizedGenerationResultBase(GenerationResultBase):
 
                             beam_output.finish_reason = 'stop'
                             beam_output.stop_reason = stop_reason
+                            stopped_while_generating |= is_generating
                             self._done = True
                             break
 
             self._apply_post_processor_hook()
+            if stopped_while_generating and not self._aborted:
+                # The stop string matched only in the decoded text, so the
+                # engine, which matches stop words by token id, is still
+                # generating. Cancel it, as the hook's terminate verdict does;
+                # on the postprocess-worker path this only flags should_abort
+                # and the proxy does the actual cancel.
+                try:
+                    self.abort()
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to abort request {self.id} after it stopped "
+                        f"on a stop string: {e}")
 
     def _apply_post_processor_hook(self):
         """Run the user post-processing hook at the detok chokepoint.
