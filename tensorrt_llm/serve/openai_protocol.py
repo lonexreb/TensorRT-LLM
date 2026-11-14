@@ -923,11 +923,11 @@ class CompletionRequest(OpenAIBaseModel):
         _record_sampling_params_request_fields(self, sampling_params)
         return sampling_params
 
-    @model_validator(mode="before")
-    @classmethod
-    def check_logprobs(cls, data):
-        check_logprobs_limit("logprobs", data.get("logprobs"))
-        return data
+    @model_validator(mode="after")
+    def check_logprobs(self):
+        # Runs on the coerced value so "5" is checked as 5.
+        check_logprobs_limit("logprobs", self.logprobs)
+        return self
 
     @field_validator("thinking_token_budget", mode="before")
     @classmethod
@@ -937,6 +937,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_stream_options(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("stream_options") and not data.get("stream"):
             raise ValueError(
                 "Stream options can only be defined when stream is true.")
@@ -945,6 +947,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_suffix(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("suffix"):
             raise ValueError("suffix is not supported")
         return data
@@ -1507,6 +1511,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode='before')
     @classmethod
     def validate_stream_options(cls, values):
+        if not isinstance(values, dict):
+            return values
         if (values.get('stream_options') is not None
                 and not values.get('stream')):
             raise ValueError("stream_options can only be set if stream is true")
@@ -1556,15 +1562,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     "messages.")
         return data
 
-    @model_validator(mode="before")
-    @classmethod
-    def check_logprobs(cls, data):
-        if (top_logprobs := data.get("top_logprobs")) is not None:
-            check_logprobs_limit("top_logprobs", top_logprobs)
-            if not data.get("logprobs"):
+    @model_validator(mode="after")
+    def check_logprobs(self):
+        # Runs on coerced values; only an explicitly sent top_logprobs is
+        # checked, since the field defaults to 0.
+        if ("top_logprobs" in self.model_fields_set
+                and self.top_logprobs is not None):
+            check_logprobs_limit("top_logprobs", self.top_logprobs)
+            if not self.logprobs:
                 raise ValueError(
                     "logprobs must be true when using top_logprobs")
-        return data
+        return self
 
     @field_validator("thinking_token_budget", mode="before")
     @classmethod
@@ -1574,6 +1582,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_suffix(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("suffix"):
             raise ValueError("suffix is not supported")
         return data
@@ -1981,6 +1991,8 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_background(cls, data):
+        if not isinstance(data, dict):
+            return data
         if not data.get("background"):
             return data
         if not data.get("store", True):
@@ -1990,6 +2002,8 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("prompt") is not None:
             raise ValueError("prompt template is not supported")
         return data
