@@ -55,6 +55,41 @@ def _parse_size(size_str: str) -> tuple[Optional[int], Optional[int]]:
     return int(parts[0]), int(parts[1])
 
 
+def _resolve_num_frames(
+    num_frames: Optional[int], seconds: Optional[float], fps: int
+) -> tuple[Optional[int], Optional[float]]:
+    """Resolve the frame count and duration to benchmark with.
+
+    Mirrors the trtllm-serve video path (``tensorrt_llm/serve/visual_gen_utils.py``):
+    ``num_frames`` wins; otherwise ``seconds`` is converted with ``int(seconds * fps)``.
+    With neither given, ``num_frames`` stays ``None`` so the pipeline uses its model
+    default (image models are never forced to a frame count).
+
+    Args:
+        num_frames: Value of ``--num_frames``, or ``None``.
+        seconds: Value of ``--seconds``, or ``None``.
+        fps: Value of ``--fps``.
+
+    Returns:
+        ``(num_frames, seconds)`` actually requested; ``seconds`` is derived as
+        ``num_frames / fps`` when ``num_frames`` is given, and both are ``None``
+        when neither is given.
+    """
+    if num_frames is not None:
+        return num_frames, num_frames / fps
+    if seconds is None:
+        return None, None
+    derived = int(seconds * fps)
+    if derived < 1:
+        raise click.BadParameter(
+            f"Derived frame count is {derived} (from seconds={seconds} * fps={fps}); "
+            "at least 1 frame is required. Pass a larger --seconds value, a larger "
+            "--fps, or --num_frames directly.",
+            param_hint="--seconds",
+        )
+    return derived, seconds
+
+
 @click.command(name="visual-gen", context_settings={"show_default": True})
 @click.option(
     "--visual_gen_args",
@@ -91,8 +126,9 @@ def _parse_size(size_str: str) -> tuple[Optional[int], Optional[int]]:
 @click.option(
     "--seconds",
     type=float,
-    default=4.0,
-    help="Video duration in seconds.",
+    default=None,
+    help="Video duration in seconds, converted to int(seconds * fps) frames. "
+    "Ignored when --num_frames is given. If neither is given, the model default is used.",
 )
 @click.option(
     "--fps",
@@ -180,7 +216,7 @@ def visual_gen_command(
     prompt_file: Optional[str],
     num_prompts: int,
     size: str,
-    seconds: float,
+    seconds: Optional[float],
     fps: int,
     num_frames: Optional[int],
     num_inference_steps: Optional[int],
@@ -229,9 +265,9 @@ def visual_gen_command(
 
     # Parse generation parameters
     width, height = _parse_size(size)
+    num_frames, seconds = _resolve_num_frames(num_frames, seconds, fps)
     if num_frames is not None:
-        seconds = num_frames / fps
-        logger.info(f"Computed seconds={seconds:.3f} from num_frames={num_frames} / fps={fps}")
+        logger.info(f"Generating num_frames={num_frames} ({seconds:.3f}s at fps={fps})")
 
     gen_params_kwargs: dict = {"seed": seed, "frame_rate": float(fps)}
     if height is not None:
@@ -253,6 +289,7 @@ def visual_gen_command(
         "size": size,
         "seconds": seconds,
         "fps": fps,
+        "num_frames": num_frames,
     }
     if num_inference_steps is not None:
         gen_params_for_report["num_inference_steps"] = num_inference_steps
